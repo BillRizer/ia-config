@@ -1,0 +1,160 @@
+---
+description: Frontend Next.js + App Router + TanStack Query + shadcn + Zod. Arquitetura em camadas, containers, use-cases isolados, requests tipados.
+globs:
+  - root-path/apps/web/**
+---
+
+# Frontend — Next.js + React
+
+## 0) Regra de ouro
+UI (React/Next) **não contém regra de negócio**.
+```
+domain/        → entidades, tipos, validações puras (sem React)
+use-cases/     → lógica isolada e testável (input → validação → gateway → output)
+lib/api/       → camada HTTP tipada (fetchers)
+features/*/    → hooks + containers (orquestração de estado)
+components/    → componentes reutilizáveis sem estado de negócio
+app/           → rotas (Server Components por padrão)
+```
+
+---
+
+## 1) Server vs Client Components
+- **Server Component por padrão** — sem `'use client'`.
+- `'use client'` apenas quando necessário: `useState`, `useEffect`, handlers, React Hook Form, TanStack Query.
+- Manter Client Components pequenos; empurrar lógica para hooks.
+
+```tsx
+// page.tsx → Server Component
+export default async function LeadsPage() {
+  return <LeadsContainer /> // ← Client Component inicia aqui
+}
+
+// features/leads/LeadsContainer.tsx
+'use client'
+export function LeadsContainer() { /* estado, queries, filtros */ }
+```
+
+---
+
+## 2) Arquitetura de componentes (obrigatória)
+```
+app/leads/page.tsx                     ← Server Component (entry, sem JSX próprio)
+└── features/leads/LeadsContainer.tsx  ← Client Component (coordena estado)
+    ├── LeadsFilters.tsx               ← filtros com debounce
+    ├── LeadsList.tsx                  ← mapeia IDs → LeadsListItem
+    │   └── LeadsListItem.tsx          ← renderiza um item (sem fetch)
+    └── LeadsModal.tsx                 ← form RHF + Zod (onSuccess, onClose)
+```
+
+| Camada | Responsabilidade | Proibido |
+|---|---|---|
+| `page.tsx` | Instancia Container | Estado, fetch, JSX de UI |
+| `Container` | Queries, filtros, modal aberto | Renderizar listas/itens diretamente |
+| `List` | Mapeia array → `ListItem` | Chamadas HTTP, lógica de negócio |
+| `ListItem` | Renderiza um item | Fetch, props de 2+ níveis acima |
+| `Modal` | Form RHF+Zod, `onSuccess`/`onClose` | Estado global, queries externas |
+| `Filters` | Inputs + debounce, emite valor final | Chamar API diretamente |
+
+---
+
+## 3) Use-case isolado do hook (testável)
+```ts
+// features/leads/use-cases/list-leads.use-case.ts  ← lógica pura, testável sem React
+export function buildListLeadsQuery(page: number, search: string, limit = 20) {
+  return {
+    queryKey: ['leads', { page, limit, search }],
+    queryFn: () => listLeads({ page, limit, search }),
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+  }
+}
+
+// features/leads/hooks/use-list-leads.ts  ← só integra com React Query
+export function useListLeads(page: number, search: string) {
+  return useQuery(buildListLeadsQuery(page, search))
+}
+```
+
+---
+
+## 4) Camada de API tipada
+```ts
+// lib/api/leads.ts — nunca fetch avulso em componente
+export async function listLeads(params: {
+  page?: number; limit?: number; search?: string
+}): Promise<PaginatedResponse<Lead>> {
+  const q = new URLSearchParams(
+    Object.entries(params)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => [k, String(v)])
+  )
+  return apiJson<PaginatedResponse<Lead>>(`/leads?${q}`)
+}
+
+// lib/api/client.ts — fetcher base
+export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...init?.headers },
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new ApiError(res.status, err.message ?? 'Erro desconhecido', err)
+  }
+  return res.json()
+}
+```
+
+---
+
+## 5) Forms (React Hook Form + Zod)
+```ts
+// Schema perto da feature
+const createLeadSchema = z.object({
+  name: z.string().min(1, 'Nome obrigatório'),
+  email: z.string().email('Email inválido'),
+})
+type CreateLeadForm = z.infer<typeof createLeadSchema>
+
+// Componente
+const form = useForm<CreateLeadForm>({ resolver: zodResolver(createLeadSchema) })
+```
+
+---
+
+## 6) TanStack Query — regras
+- **Nunca** `useState + useEffect` para fetch — sempre TanStack Query.
+- `queryKey` como array: `['leads', { page, search }]`.
+- Dados que cruzam 2+ níveis de componentes → query hook compartilhado (sem props drilling).
+- `keepPreviousData` em paginação.
+- Context API: apenas para estado de UI global (tema, user autenticado) — nunca server-state.
+
+---
+
+## 7) UI (shadcn + Tailwind)
+- Preferir componentes de `components/ui/` (shadcn) antes de criar novos.
+- Componentes compartilhados vão em `components/` ou `packages/ui` (se compartilhados entre apps).
+- Acessibilidade: `label` em inputs, foco visível, `aria-*` quando necessário.
+- Sem CSS global. Tailwind + componentes shadcn.
+
+---
+
+## 8) Regras de performance no frontend
+- **Debounce obrigatório** em filtros de texto (300–500ms) antes de disparar query.
+- `staleTime` por recurso: dados estáticos → 5–30min; listas ativas → 30s–2min.
+- Listas longas (>50 itens): `@tanstack/react-virtual`.
+- Imagens: `next/image` sempre (lazy, otimização automática).
+- Imports pesados não-críticos: `next/dynamic`.
+
+---
+
+## 9) Checklist antes de finalizar
+- [ ] Regra de negócio fora da UI (em `use-cases/` ou hook dedicado)
+- [ ] Use-case isolado e testável sem React
+- [ ] Server Components por padrão; `'use client'` só quando necessário
+- [ ] TanStack Query para server-state
+- [ ] Filtros de texto com debounce
+- [ ] Camada `lib/api/` com tipagem completa (sem `any`)
+- [ ] Loading e empty states tratados
+- [ ] Componentes shadcn compartilhados antes de criar novos

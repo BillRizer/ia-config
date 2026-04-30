@@ -1,0 +1,114 @@
+---
+description: Segurança aplicada à stack — OWASP Top 10, SQL Injection, XSS, exposição de dados. Regras práticas por camada.
+globs:
+  - root-path/apps/api/**
+  - root-path/apps/web/**
+  - root-path/apps/worker/**
+  - root-path/packages/**
+---
+
+# Segurança
+
+## 1) SQL Injection — prevenção obrigatória
+```ts
+// ❌ Nunca concatenar SQL
+qb.where(`lead.name = '${name}'`)
+
+// ✅ Sempre parâmetros nomeados
+qb.where('lead.name = :name', { name })
+qb.andWhere('lead.status IN (:...statuses)', { statuses })
+
+// ✅ TypeORM find options também são seguros
+repo.findOne({ where: { email } })
+```
+Prisma e find options do TypeORM usam prepared statements internamente — QueryBuilder **exige** parâmetros explícitos.
+
+---
+
+## 2) XSS — prevenção por camada
+
+### API (NestJS)
+- Validar e rejeitar inputs com Zod — nunca aceitar HTML/script em campos de texto puro.
+- Nunca retornar input do usuário como `text/html`.
+- Configurar headers de segurança via `helmet` no `main.ts`:
+```ts
+import helmet from 'helmet'
+app.use(helmet()) // CSP, X-Content-Type-Options, X-Frame-Options, etc.
+```
+
+### Frontend (Next.js)
+- **Nunca** usar `dangerouslySetInnerHTML` com conteúdo vindo do usuário ou da API sem sanitização.
+- React escapa por padrão — não contornar isso.
+- Se precisar renderizar HTML do backend (rich text): usar `DOMPurify` antes.
+```ts
+import DOMPurify from 'dompurify'
+<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(content) }} />
+```
+
+---
+
+## 3) Exposição de dados sensíveis
+```ts
+// ❌ Nunca retornar entidade TypeORM diretamente
+return lead // pode conter campos internos
+
+// ✅ Sempre mapear para DTO de resposta
+return toLeadResponse(lead) // função que seleciona campos públicos
+
+// ❌ Nunca logar dados sensíveis
+logger.log(`User password: ${password}`)
+
+// ✅ Mascarar
+logger.log(`Login attempt for email=${email}`)
+```
+
+**Variáveis de ambiente:** nunca hardcodar credenciais no código — usar `.env` + validação Zod no boot:
+```ts
+const envSchema = z.object({
+  DATABASE_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  REDIS_URL: z.string(),
+})
+const env = envSchema.parse(process.env) // fail-fast no boot se inválido
+```
+
+---
+
+## 4) Autenticação e autorização
+- **AuthN** (Guards): valida token JWT, preenche `req.user`.
+- **AuthZ** (use-case/domínio): verifica se o usuário autenticado **pode** executar a ação.
+- Princípio do menor privilégio: usuário de banco com permissões mínimas.
+- Implementar rate limiting (Throttler NestJS) em endpoints públicos e de login.
+- Cookies com `HttpOnly`, `Secure`, `SameSite=Strict`.
+
+---
+
+## 5) APIs internas
+- APIs internas **não devem ser expostas** publicamente.
+- Usar DNS interno do cluster (K8s/EKS) para comunicação entre serviços.
+- Validar `x-internal-token` ou mTLS em chamadas entre serviços quando necessário.
+- Nunca usar ALB público para APIs que não precisam de acesso externo.
+
+---
+
+## 6) Configuração segura
+- `helmet()` em `main.ts` para headers HTTP de segurança.
+- Desabilitar debug e stack traces em produção (`NODE_ENV=production`).
+- Remover endpoints de saúde/debug que expõem informações internas.
+- `synchronize: false` no TypeORM — nunca alterar schema automaticamente em produção.
+- Manter dependências atualizadas (`npm audit` no CI).
+
+---
+
+## 7) Não expor em produção
+- Stack traces em respostas HTTP → logar internamente, retornar mensagem genérica.
+- Mensagens de erro detalhadas do banco (ex.: `duplicate key value violates unique constraint`).
+- Versões de frameworks/libs em headers.
+- Rotas de debug/admin sem autenticação.
+
+---
+
+## Referências
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [OWASP XSS Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- [OWASP SQL Injection Prevention](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)

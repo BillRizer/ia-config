@@ -1,0 +1,118 @@
+---
+description: Worker com BullMQ + Redis — idempotência, retry/backoff, payload mínimo, cache Redis. Remova esta rule se o projeto não usa BullMQ.
+globs:
+  - root-path/apps/worker/**
+  - root-path/packages/use-cases/**
+  - root-path/packages/shared/**
+---
+
+# Worker — BullMQ + Redis
+
+## 0) Princípios
+- Processor não contém regra de negócio — chama use-case.
+- Jobs devem ser **idempotentes** (executar 2x não corrompe estado).
+- Payload mínimo: apenas IDs e referências — nunca dados sensíveis, nunca entidades completas.
+
+---
+
+## 1) Definição de job e opções
+```ts
+// apps/worker/src/jobs/email.job.ts
+export const EMAIL_QUEUE = 'email'
+export const SEND_EMAIL_JOB = 'sendEmail'
+
+export interface SendEmailJobData {
+  deliveryEmailId: string
+  correlationId?: string
+}
+
+export const sendEmailJobOptions: JobsOptions = {
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 2_000 },
+  removeOnComplete: { count: 100 },
+  removeOnFail: { count: 500 },     // manter para diagnóstico
+}
+```
+
+## 2) Producer (API enfileira, nunca processa)
+```ts
+// apps/api/src/mail/mail.service.ts
+await this.emailQueue.add(
+  SEND_EMAIL_JOB,
+  { deliveryEmailId: delivery.id, correlationId } satisfies SendEmailJobData,
+  { ...sendEmailJobOptions, jobId: `email-${delivery.id}` }, // jobId determinístico = deduplicação
+)
+```
+
+## 3) Processor (Worker processa)
+```ts
+// apps/worker/src/mail/mail.processor.ts
+@Processor(EMAIL_QUEUE)
+export class MailProcessor extends WorkerHost {
+  private readonly logger = new Logger(MailProcessor.name)
+
+  async process(job: Job<SendEmailJobData>): Promise<void> {
+    const { deliveryEmailId, correlationId } = job.data
+    const start = Date.now()
+
+    this.logger.log(
+      `[${EMAIL_QUEUE}] job=${job.name} id=${job.id} attempt=${job.attemptsMade + 1} deliveryId=${deliveryEmailId}`
+    )
+
+    // Validar payload com Zod
+    const parsed = SendEmailJobSchema.safeParse(job.data)
+    if (!parsed.success) throw new Error(`Invalid job payload: ${JSON.stringify(parsed.error.flatten())}`)
+
+    // Idempotência: recarregar estado do banco
+    await this.sendEmailUseCase.execute({ deliveryEmailId, correlationId })
+
+    this.logger.log(`[${EMAIL_QUEUE}] job=${job.name} id=${job.id} completed in ${Date.now() - start}ms`)
+  }
+
+  @OnWorkerEvent('failed')
+  onFailed(job: Job, err: Error) {
+    this.logger.error(
+      `[${EMAIL_QUEUE}] job=${job.name} id=${job.id} attempt=${job.attemptsMade}/${job.opts.attempts} failed: ${err.message}`,
+      err.stack,
+    )
+  }
+}
+```
+
+---
+
+## 2) Redis Cache — padrões
+```ts
+// Namespace obrigatório: app:<env>:<feature>:<key>
+const cacheKey = `app:${env}:leads:byId:${id}`
+
+// TTL obrigatório em toda key
+await this.redis.set(cacheKey, JSON.stringify(data), 'EX', 300) // 5min
+
+// Invalidação on-write (após commit no Postgres)
+await this.redis.del(cacheKey)
+```
+
+### Categorias de TTL
+| Dado | TTL sugerido |
+|---|---|
+| Listas dinâmicas com filtros | 30–60s |
+| Detalhes de entidade | 2–5min |
+| Catálogos / configurações | 15–60min |
+
+### Anti-patterns de cache
+- **Nunca** cachear sem TTL.
+- **Nunca** cachear dados sensíveis sem necessidade clara.
+- **Nunca** usar cache como fonte de verdade (sempre PostgreSQL é source of truth).
+- **Nunca** cachear resposta de erro 5xx.
+
+---
+
+## 3) Checklist ao criar job
+- [ ] Schema Zod para o payload do job
+- [ ] `jobId` determinístico para deduplicação quando aplicável
+- [ ] Idempotência: checar "já foi feito?" antes de executar efeito externo
+- [ ] `attempts` + `backoff` exponencial definidos
+- [ ] Erros de validação/regra → `attempts: 1` (não tem sentido retry)
+- [ ] Erros transitórios (rede, timeout) → retry com backoff
+- [ ] Logs de início, conclusão e falha

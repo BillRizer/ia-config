@@ -1,0 +1,158 @@
+---
+description: Testes unitários com Jest — padrões de mock para repositórios, use-cases, hooks React e processors de fila.
+globs:
+  - root-path/apps/**
+  - root-path/packages/**
+---
+
+# Testes Unitários — Jest
+
+## 0) Princípios
+- **Unit tests** obrigatórios em: use-cases, domain, funções de use-case do frontend.
+- **Integration tests** quando necessário: repositórios TypeORM (banco real ou testcontainers).
+- Sem testes de timing de fila.
+- Arquivo de teste co-localizado: `create-lead.use-case.spec.ts` ao lado de `create-lead.use-case.ts`.
+
+---
+
+## 1) Use-case (packages/use-cases)
+```ts
+// packages/use-cases/src/leads/__tests__/create-lead.use-case.spec.ts
+import { CreateLeadUseCase } from '../create-lead.use-case'
+import { BusinessRuleViolation } from '@repo/domain'
+
+// Mock tipado da interface de repositório
+const makeLeadRepo = (): jest.Mocked<ILeadRepository> => ({
+  findByEmail: jest.fn(),
+  save: jest.fn(),
+  getByIdOrFail: jest.fn(),
+  listWithFilters: jest.fn(),
+})
+
+describe('CreateLeadUseCase', () => {
+  let useCase: CreateLeadUseCase
+  let leadRepo: jest.Mocked<ILeadRepository>
+
+  beforeEach(() => {
+    leadRepo = makeLeadRepo()
+    useCase = new CreateLeadUseCase(leadRepo)
+  })
+
+  it('cria lead com sucesso quando email não existe', async () => {
+    leadRepo.findByEmail.mockResolvedValue(null)
+    leadRepo.save.mockResolvedValue({ id: 'uuid-1', name: 'João', email: 'joao@ex.com' } as any)
+
+    const result = await useCase.execute({ name: 'João', email: 'joao@ex.com' })
+
+    expect(result.id).toBe('uuid-1')
+    expect(leadRepo.findByEmail).toHaveBeenCalledWith('joao@ex.com')
+    expect(leadRepo.save).toHaveBeenCalledOnce()
+  })
+
+  it('lança BusinessRuleViolation quando email já existe', async () => {
+    leadRepo.findByEmail.mockResolvedValue({ id: 'uuid-1' } as any)
+
+    await expect(useCase.execute({ name: 'João', email: 'joao@ex.com' }))
+      .rejects.toThrow(BusinessRuleViolation)
+
+    expect(leadRepo.save).not.toHaveBeenCalled()
+  })
+})
+```
+
+---
+
+## 2) Domain (packages/domain)
+```ts
+// Testar invariantes/entidades sem mocks
+describe('LeadEntity', () => {
+  it('não aceita email inválido', () => {
+    expect(() => new LeadEntity({ email: 'invalido' })).toThrow()
+  })
+
+  it('converte para opportunity apenas quando status é active', () => {
+    const lead = new LeadEntity({ status: 'archived' })
+    expect(() => lead.convert()).toThrow(BusinessRuleViolation)
+  })
+})
+```
+
+---
+
+## 3) Frontend — use-case isolado (sem React)
+```ts
+// apps/web/features/leads/use-cases/__tests__/list-leads.use-case.spec.ts
+import { buildListLeadsQuery } from '../list-leads.use-case'
+
+// Testar a lógica sem montar componente
+describe('buildListLeadsQuery', () => {
+  it('gera queryKey correta com filtros', () => {
+    const query = buildListLeadsQuery(2, 'João')
+    expect(query.queryKey).toEqual(['leads', { page: 2, limit: 20, search: 'João' }])
+  })
+
+  it('usa staleTime de 60s', () => {
+    const query = buildListLeadsQuery(1, '')
+    expect(query.staleTime).toBe(60_000)
+  })
+})
+```
+
+---
+
+## 4) Processor/Consumer de fila
+```ts
+describe('MailProcessor', () => {
+  let processor: MailProcessor
+  let sendEmailUseCase: jest.Mocked<SendEmailUseCase>
+
+  beforeEach(async () => {
+    sendEmailUseCase = { execute: jest.fn() } as any
+    const module = await Test.createTestingModule({
+      providers: [
+        MailProcessor,
+        { provide: SendEmailUseCase, useValue: sendEmailUseCase },
+      ],
+    }).compile()
+    processor = module.get(MailProcessor)
+  })
+
+  it('chama use-case com payload válido', async () => {
+    sendEmailUseCase.execute.mockResolvedValue(undefined)
+
+    await processor.process({ data: { deliveryEmailId: 'uuid-1' } } as any)
+
+    expect(sendEmailUseCase.execute).toHaveBeenCalledWith({ deliveryEmailId: 'uuid-1' })
+  })
+
+  it('lança erro com payload inválido (não chama use-case)', async () => {
+    await expect(processor.process({ data: {} } as any)).rejects.toThrow()
+    expect(sendEmailUseCase.execute).not.toHaveBeenCalled()
+  })
+})
+```
+
+---
+
+## 5) Boas práticas
+- `makeXxxRepo()` factory function para criar mocks — reutilizar entre testes.
+- `beforeEach` para resetar mocks (`jest.clearAllMocks()` no `jest.config.ts`).
+- Testar: caminho feliz + erros de negócio + casos de borda.
+- Nomes descritivos: `'lança BusinessRuleViolation quando X'` > `'test error case'`.
+- Sem `any` em mocks: tipar com `jest.Mocked<Interface>`.
+- Evitar `setTimeout` / `setInterval` em testes — usar `jest.useFakeTimers()` se necessário.
+
+## 6) Configuração (jest.config.ts base)
+```ts
+export default {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  clearMocks: true,           // reset automático entre testes
+  coverageThreshold: {
+    global: { lines: 80 },    // ajustar por projeto
+  },
+  moduleNameMapper: {
+    '^@repo/(.*)$': '<rootDir>/../../packages/$1/src',
+  },
+}
+```

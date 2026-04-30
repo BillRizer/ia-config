@@ -1,0 +1,29 @@
+---
+description: Convenção de nomes — camelCase no código, snake_case no banco. Sempre aplicar.
+alwaysApply: true
+---
+
+# Naming
+
+| Contexto | Convenção | Exemplo |
+|---|---|---|
+| Variáveis, props, funções, classes | camelCase | `fullName`, `createdAt`, `findByEmail` |
+| Arquivos de componente React | PascalCase | `LeadListItem.tsx` |
+| Arquivos de hook, util, service | kebab-case | `use-leads.ts`, `paginate.ts` |
+| Colunas e tabelas no banco | snake_case | `full_name`, `created_at`, `lead_id` |
+| Filas (BullMQ/RabbitMQ) | `feature.action` | `email.send`, `billing.recalc` |
+| Variáveis de ambiente | UPPER_SNAKE_CASE | `DATABASE_URL`, `REDIS_HOST` |
+
+## TypeORM: mapear snake_case do banco para camelCase no código
+```ts
+@Column({ name: 'full_name' })
+fullName: string;
+
+@CreateDateColumn({ name: 'created_at' })
+createdAt: Date;
+```
+
+## Proibido
+- `snake_case` em variáveis, props ou estado TypeScript/JavaScript
+- `camelCase` em nomes de colunas/tabelas (migrations e SQL)
+- `any` explícito — prefira `unknown` + narrowing

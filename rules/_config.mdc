@@ -1,0 +1,39 @@
+---
+description: Configuração do projeto — único arquivo a editar ao iniciar em novo monorepo
+alwaysApply: true
+---
+
+# Configuração do Projeto
+
+## 🔧 APP_ROOT — pasta do turborepo dentro do workspace
+<!-- Valor atual: app-ts -->
+<!-- Para trocar: execute ./setup-rules.sh app-ts <novo-root> -->
+APP_ROOT = `root-path`
+
+## Estrutura esperada
+```
+{APP_ROOT}/
+  apps/
+    api/        → NestJS HTTP API
+    web/        → Next.js frontend
+    worker/     → NestJS Worker (filas)
+  packages/
+    domain/     → entidades + invariantes (puro)
+    use-cases/  → casos de uso (puro)
+    shared/     → utilitários compartilhados (puro)
+    api/        → tipos de contrato de API compartilhados
+```
+
+## Stack ativa neste projeto
+- **Banco:** PostgreSQL + TypeORM (`synchronize: false`, migrations obrigatórias)
+- **Cache:** Redis
+- **Fila:** BullMQ   ← remova esta linha se o projeto não usa BullMQ
+- **Fila:** RabbitMQ ← remova esta linha se o projeto não usa RabbitMQ
+- **Frontend:** Next.js (App Router) + TanStack Query + shadcn/ui + Zod
+- **Validação:** Zod (`nestjs-zod` na API, `safeParse` manual em webhooks/workers)
+- **Testes:** Jest (unit obrigatório; integration quando necessário)
+
+## Idioma
+- Chat / explicações: **português**
+- Código (variáveis, funções, classes, arquivos): **inglês**
+  - Exceção: termos sem tradução adequada para inglês (ex.: nomes de domínio do negócio)

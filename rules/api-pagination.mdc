@@ -1,0 +1,163 @@
+---
+description: Contrato de paginação — API (Zod DTO, helper, repositório) e Frontend (hook, componente). Todo GET que retorna array deve ser paginado.
+globs:
+  - root-path/apps/api/**
+  - root-path/apps/web/**
+  - root-path/packages/shared/**
+---
+
+# Paginação — Contrato Padrão
+
+## Tipo compartilhado (packages/shared)
+```ts
+// packages/shared/src/types/paginated-response.ts
+export interface PaginatedResponse<T> {
+  data: T[]
+  meta: {
+    total: number
+    page: number
+    limit: number
+    totalPages: number
+  }
+}
+```
+
+---
+
+## API
+
+### DTO base (Zod)
+```ts
+// apps/api/src/common/dto/pagination.dto.ts
+import { z } from 'zod'
+import { createZodDto } from 'nestjs-zod'
+
+export const PaginationSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  order: z.enum(['ASC', 'DESC']).default('DESC'),
+})
+export class PaginationDto extends createZodDto(PaginationSchema) {}
+export type PaginationInput = z.infer<typeof PaginationSchema>
+```
+
+### Helper de resposta
+```ts
+// apps/api/src/common/helpers/paginate.ts
+export function paginatedResponse<T>(
+  data: T[],
+  total: number,
+  page: number,
+  limit: number,
+): PaginatedResponse<T> {
+  return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } }
+}
+```
+
+### Uso no repositório
+```ts
+// QueryBuilder + getManyAndCount() — nunca duas queries separadas
+const [data, total] = await qb
+  .skip((page - 1) * limit)
+  .take(Math.min(limit, 100))
+  .getManyAndCount()
+return { data, total }
+```
+
+### Uso no controller
+```ts
+@Get()
+async list(@Query() filters: FilterLeadsDto) {
+  const { data, total } = await this.listLeads.execute(filters)
+  return paginatedResponse(data.map(toResponseDto), total, filters.page, filters.limit)
+}
+```
+
+### Status codes
+| Ação | Status | Body |
+|---|---|---|
+| Lista paginada | 200 | `PaginatedResponse<T>` |
+| Detalhe | 200 | `T` |
+| Criação | 201 | `T` |
+| Update | 200 | `T` |
+| Delete | 204 | — |
+| Não encontrado | 404 | `ApiErrorResponse` |
+| Validação | 400 | `ApiErrorResponse` |
+
+---
+
+## Frontend
+
+### Hook genérico de paginação
+```ts
+// apps/web/lib/hooks/use-paginated-query.ts
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import type { PaginatedResponse } from '@repo/shared'
+
+export function usePaginatedQuery<T>(
+  key: string,
+  fetcher: (p: { page: number; limit: number } & Record<string, unknown>) => Promise<PaginatedResponse<T>>,
+  options: { page: number; limit?: number; filters?: Record<string, unknown> },
+) {
+  const { page, limit = 20, filters = {} } = options
+  return useQuery({
+    queryKey: [key, { page, limit, ...filters }],
+    queryFn: () => fetcher({ page, limit, ...filters }),
+    placeholderData: keepPreviousData, // sem flash entre páginas
+  })
+}
+```
+
+### Camada de API (tipada)
+```ts
+// apps/web/lib/api/leads.ts
+export async function listLeads(params: {
+  page?: number; limit?: number; search?: string
+}): Promise<PaginatedResponse<Lead>> {
+  const q = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])
+  )
+  return apiJson<PaginatedResponse<Lead>>(`/leads?${q}`)
+}
+```
+
+### Uso em componente
+```tsx
+// Separar use-case do hook — mais testável
+// apps/web/features/leads/use-cases/list-leads.use-case.ts
+export function useListLeadsUseCase(page: number, search: string) {
+  return usePaginatedQuery('leads', listLeads, { page, filters: { search } })
+}
+
+// apps/web/features/leads/LeadsContainer.tsx
+export function LeadsContainer() {
+  const [page, setPage] = useState(1)
+  const [search, setSearch] = useState('')
+  const debouncedSearch = useDebounce(search, 350) // nunca filtrar sem debounce
+
+  const { data, isLoading } = useListLeadsUseCase(page, debouncedSearch)
+  // data.data → items | data.meta → { total, totalPages, ... }
+}
+```
+
+### Componente de paginação
+```tsx
+// apps/web/components/ui/pagination.tsx (shadcn base)
+interface Props { page: number; totalPages: number; onChange: (p: number) => void }
+
+export function Pagination({ page, totalPages, onChange }: Props) {
+  return (
+    <div className="flex items-center gap-2">
+      <Button variant="outline" disabled={page === 1} onClick={() => onChange(page - 1)}>
+        Anterior
+      </Button>
+      <span className="text-sm text-muted-foreground">
+        Página {page} de {totalPages}
+      </span>
+      <Button variant="outline" disabled={page === totalPages} onClick={() => onChange(page + 1)}>
+        Próxima
+      </Button>
+    </div>
+  )
+}
+```

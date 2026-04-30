@@ -1,0 +1,47 @@
+---
+description: Orquestrador de rules — mapeia contexto de arquivo às regras a carregar. Não duplica conteúdo.
+alwaysApply: true
+---
+
+# Índice de Rules
+
+> Rules são carregadas **dinamicamente por glob** — somente as relevantes para o arquivo em edição.
+> Este arquivo apenas documenta o mapa. As regras concretas estão nos arquivos referenciados.
+
+## Regras sempre ativas (alwaysApply)
+| Arquivo | Conteúdo |
+|---|---|
+| `_config.mdc` | APP_ROOT, stack, idioma |
+| `_index.mdc` | Este arquivo |
+| `naming.mdc` | camelCase em código, snake_case no banco |
+
+## Regras por contexto (carregadas via glob)
+
+### `apps/api/**`
+- `api-nestjs.mdc` — arquitetura, DTOs Zod, repositórios, TypeORM
+- `api-pagination.mdc` — contrato de paginação (seção API)
+- `api-error-handling.mdc` — exception filter, domínio de erros
+- `api-logging.mdc` — Logger estruturado, interceptor HTTP
+
+### `apps/api/src/webhooks/**`
+- `api-webhooks.mdc` — rotas, Zod safeParse, idempotência
+
+### `apps/worker/**`
+- `worker-bullmq.mdc` — **se usa BullMQ** (remova se projeto não usa)
+- `worker-rabbitmq.mdc` — **se usa RabbitMQ** (remova se projeto não usa)
+- `api-logging.mdc` — logging de jobs
+- `api-error-handling.mdc` — categorização de erros
+
+### `apps/web/**`
+- `web-react.mdc` — App Router, Server/Client Components, TanStack, shadcn, containers
+- `api-pagination.mdc` — contrato de paginação (seção Frontend)
+
+### `apps/**` e `packages/**`
+- `performance.mdc` — N+1, índices, React Query staleTime, debounce
+- `security.mdc` — OWASP Top 10 aplicado, SQL Injection, XSS, exposição
+- `testing.mdc` — padrões Jest, unit de use-cases, mocks de repositório
+
+## Como adicionar uma nova rule
+1. Criar `nova-rule.mdc` com `globs:` específico.
+2. Adicionar linha nesta tabela.
+3. Se `alwaysApply: true`, manter o arquivo **< 30 linhas**.

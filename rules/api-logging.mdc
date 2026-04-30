@@ -1,0 +1,85 @@
+---
+description: Logging estruturado — NestJS Logger (nestjs-pino como alvo). Sem console.log em produção.
+globs:
+  - root-path/apps/api/**
+  - root-path/apps/worker/**
+---
+
+# Logging Estruturado
+
+## Regra de ouro
+- **Proibido:** `console.log` / `console.error` em código de produção.
+- **Padrão:** `Logger` do `@nestjs/common`.
+- **Alvo futuro:** `nestjs-pino` para JSON em produção.
+
+## Uso correto
+```ts
+import { Logger } from '@nestjs/common'
+
+export class LeadsService {
+  private readonly logger = new Logger(LeadsService.name)
+
+  async create(input: CreateLeadInput) {
+    this.logger.log(`Creating lead email=${input.email}`)
+    try {
+      // ...
+      this.logger.log(`Lead created id=${lead.id}`)
+    } catch (err) {
+      this.logger.error('Failed to create lead', err instanceof Error ? err.stack : String(err))
+      throw err
+    }
+  }
+}
+```
+
+## Níveis e quando usar
+| Método | Quando |
+|---|---|
+| `logger.log()` | Eventos de negócio relevantes (lead criado, job concluído) |
+| `logger.warn()` | Anomalia não-fatal (retry, dado incomum, query lenta) |
+| `logger.error(msg, stack)` | Falha inesperada — sempre incluir stack |
+| `logger.debug()` | Detalhe de troubleshooting — desabilitado em prod |
+
+## O que NUNCA logar
+- Senhas, tokens, refresh tokens, API keys.
+- CPF, número de cartão, dados bancários.
+- Body completo de requests com dados sensíveis.
+- Stack trace em respostas HTTP (logar internamente, jamais expor ao client).
+
+## Interceptor HTTP (registrar em main.ts)
+```ts
+// apps/api/src/common/interceptors/logging.interceptor.ts
+@Injectable()
+export class LoggingInterceptor implements NestInterceptor {
+  private readonly logger = new Logger('HTTP')
+
+  intercept(ctx: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const req = ctx.switchToHttp().getRequest<Request>()
+    const start = Date.now()
+
+    return next.handle().pipe(
+      tap(() => {
+        const res = ctx.switchToHttp().getResponse<Response>()
+        const ms = Date.now() - start
+        if (ms > 500) {
+          this.logger.warn(`SLOW ${req.method} ${req.url} → ${res.statusCode} (${ms}ms)`)
+        } else {
+          this.logger.log(`${req.method} ${req.url} → ${res.statusCode} (${ms}ms)`)
+        }
+      }),
+    )
+  }
+}
+// main.ts: app.useGlobalInterceptors(new LoggingInterceptor())
+```
+
+## Worker — logs obrigatórios por job
+```ts
+this.logger.log(`[${queue}] job=${job.name} id=${job.id} attempt=${job.attemptsMade + 1} started`)
+this.logger.log(`[${queue}] job=${job.name} id=${job.id} completed in ${ms}ms`)
+this.logger.error(`[${queue}] job=${job.name} id=${job.id} failed: ${err.message}`, err.stack)
+```
+
+## CorrelationId
+- Gerar/propagar `x-request-id` via interceptor.
+- Incluir em todos os logs da request e em payloads de jobs enfileirados.

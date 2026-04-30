@@ -1,0 +1,91 @@
+---
+description: Fluxo de emails — enqueue na API, processamento no worker, templates Handlebars. Aplicar ao criar ou editar funcionalidades de email.
+globs:
+  - root-path/apps/api/src/mail/**
+  - root-path/apps/worker/src/mail/**
+  - root-path/packages/shared/src/mail/**
+---
+
+# Email — Fluxo e Templates
+
+## Fluxo obrigatório
+```
+API → MailService.enqueue()
+    → cria DeliveryEmail (status: Pending)
+    → adiciona job à fila (BullMQ ou RabbitMQ)
+    → atualiza status: Queued
+
+Worker → MailProcessor/Consumer
+       → carrega DeliveryEmail por ID (idempotência)
+       → compila template Handlebars + payload
+       → envia via provider (Mailgun, SendGrid, etc)
+       → atualiza status: Sent | Failed
+```
+
+---
+
+## Ao adicionar novo tipo de email
+
+### 1. packages/shared — enum + tipo do payload
+```ts
+// packages/shared/src/mail/email-templates.ts
+export enum EmailTemplateName {
+  ForgotPassword = 'forgot-password',
+  WelcomeUser = 'welcome-user',
+  // ↑ adicionar aqui
+}
+
+export interface ForgotPasswordPayload {
+  userName: string
+  resetUrl: string       // link já montado com token de uso único
+  expiresInHours: number
+}
+
+// Map tipado: template → payload
+export type EmailTemplatePayloadMap = {
+  [EmailTemplateName.ForgotPassword]: ForgotPasswordPayload
+  [EmailTemplateName.WelcomeUser]: WelcomeUserPayload
+}
+```
+
+### 2. API — método de conveniência
+```ts
+// apps/api/src/mail/mail.service.ts
+async sendForgotPassword(to: string, payload: ForgotPasswordPayload): Promise<void> {
+  await this.enqueue(EmailTemplateName.ForgotPassword, to, 'Redefinição de senha', payload)
+}
+
+private async enqueue<T extends EmailTemplateName>(
+  template: T,
+  to: string,
+  subject: string,
+  payload: EmailTemplatePayloadMap[T],
+): Promise<void> {
+  const delivery = await this.deliveryEmailRepo.save({ template, to, subject, status: 'Pending', payload })
+  await this.queue.add(SEND_EMAIL_JOB, { deliveryEmailId: delivery.id }, sendEmailJobOptions)
+  await this.deliveryEmailRepo.update(delivery.id, { status: 'Queued' })
+}
+```
+
+### 3. Worker — template Handlebars
+- Criar: `apps/worker/src/mail/templates/<nome-do-enum>.hbs`
+- Nome do arquivo = valor do enum em kebab-case (`forgot-password.hbs`).
+- Usar partials `{{> header}}` e `{{> footer}}` quando disponíveis.
+
+### 4. Worker — registrar template
+```ts
+// apps/worker/src/mail/mail-template.service.ts → onModuleInit
+const templateNames = [
+  EmailTemplateName.ForgotPassword,
+  EmailTemplateName.WelcomeUser,
+  // ↑ adicionar aqui
+]
+```
+
+---
+
+## Regras
+- Payload em camelCase; tipos em `@repo/shared`.
+- Nunca dados sensíveis no payload (tokens vão dentro de URL, não em campo separado).
+- O token do reset deve ser de uso único com TTL (ex.: 1h) — invalidar após uso.
+- Nome do arquivo `.hbs` deve ser exatamente o valor do enum.

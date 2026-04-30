@@ -1,0 +1,88 @@
+---
+description: Performance — prevenção de N+1, select parcial, índices TypeORM, padrões de query eficiente, otimizações React.
+globs:
+  - root-path/apps/api/**
+  - root-path/apps/web/**
+---
+
+# Performance
+
+## 1) Prevenção de N+1 (obrigatório)
+```ts
+// ❌ Errado — N+1
+const leads = await repo.find()
+for (const lead of leads) {
+  lead.opps = await oppRepo.find({ where: { leadId: lead.id } })
+}
+
+// ✅ Correto — 1 query com join
+const leads = await repo.createQueryBuilder('lead')
+  .leftJoinAndSelect('lead.opportunities', 'opp')
+  .getMany()
+```
+**Regras:** nunca query dentro de loop | joins explícitos | não usar `eager: true`.
+
+---
+
+## 2) Select parcial em listagens
+```ts
+// Listagem: apenas colunas exibidas na tabela
+qb.select(['lead.id', 'lead.name', 'lead.email', 'lead.status', 'lead.createdAt'])
+
+// Detalhe (GET /:id): colunas completas + relações necessárias
+```
+
+---
+
+## 3) Paginação obrigatória
+- Todo `GET` que retorna array → paginado (ver `api-pagination.mdc`).
+- `getManyAndCount()` para total + dados em uma query.
+- Cap hard: `Math.min(limit, 100)`.
+
+---
+
+## 4) Padrões de query eficientes
+```ts
+// Existência
+const exists = await repo.existsBy({ email }) // ✅
+const user = await repo.findOne({ where: { email } }); if (user) {} // ❌
+
+// Contagem
+const total = await repo.count({ where: { status: 'active' } }) // ✅
+const all = await repo.find(...); all.length // ❌
+
+// Batch update
+await repo.update({ status: 'expired' }, { archivedAt: new Date() }) // ✅
+for (const item of items) { await repo.save(item) } // ❌
+```
+
+---
+
+## 5) Índices (TypeORM)
+```ts
+@Entity('leads')
+@Index(['status', 'created_at'])          // índice composto para filtros frequentes
+export class LeadEntity {
+  @Index()
+  @Column({ unique: true })
+  email: string                           // índice em coluna de busca
+
+  // FKs sempre indexadas
+  @Index()
+  @Column({ name: 'user_id' })
+  userId: string
+}
+```
+**Regra:** toda migration que adiciona coluna usada em `WHERE`/`ORDER BY` deve incluir o índice.
+
+---
+
+## 6) Frontend
+| Prática | Detalhe |
+|---|---|
+| Debounce em filtros | 300–500ms antes de disparar query |
+| `staleTime` adequado | Dados estáticos: 5–30min; listas ativas: 30s–2min |
+| `keepPreviousData` | Paginação sem flash de loading |
+| Listas longas | `@tanstack/react-virtual` para >50 itens visíveis |
+| Imagens | `next/image` sempre |
+| Imports pesados | `next/dynamic` para componentes não-críticos |

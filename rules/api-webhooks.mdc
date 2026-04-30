@@ -1,0 +1,85 @@
+---
+description: Padrão de webhooks na API — uma rota por evento, body genérico no controller, Zod safeParse no service.
+globs:
+  - root-path/apps/api/src/webhooks/**
+---
+
+# Webhooks
+
+## Convenção de rotas
+- **Base:** `POST /webhooks/:hash/callback/<tipo-evento>`
+- Um método por tipo de evento (tipo = segmento da URL, não campo no body).
+- `WebhookGuard` valida `:hash` contra config + header `x-webhook-key`.
+
+---
+
+## Controller — body sempre genérico
+```ts
+@Post(':hash/callback/n8n-wpp')
+@Public()
+@UseGuards(WebhookGuard)
+@HttpCode(HttpStatus.OK)
+async n8nWppCallback(
+  @Param('hash') _hash: string,
+  @Body() body: Record<string, unknown>,
+): Promise<{ received: true }> {
+  await this.service.handleN8nWpp(body)
+  return { received: true }
+}
+```
+
+---
+
+## Service — Zod safeParse por evento
+
+### Schema (co-localizado com o handler)
+```ts
+// apps/api/src/webhooks/schemas/n8n-wpp.schema.ts
+import { z } from 'zod'
+
+export const N8nWppSchema = z.object({
+  eventId: z.string().uuid(),
+  phone: z.string().regex(/^\d{10,15}$/, 'Telefone inválido'),
+  message: z.string().max(4096),
+  // snake_case externo → camelCase interno via transform:
+  sentAt: z.string().datetime().optional(),
+}).transform(data => ({
+  ...data,
+  phone: data.phone.replace(/\D/g, ''),
+}))
+
+export type N8nWppPayload = z.infer<typeof N8nWppSchema>
+```
+
+### Validação no service
+```ts
+@Injectable()
+export class WebhooksService {
+  async handleN8nWpp(body: Record<string, unknown>): Promise<void> {
+    const payload = this.parse(N8nWppSchema, body, 'n8n-wpp')
+    // lógica do evento com payload tipado
+    await this.useCase.execute(payload)
+  }
+
+  /** Helper reutilizável para todos os eventos */
+  private parse<T>(schema: z.ZodType<T>, body: Record<string, unknown>, event: string): T {
+    const result = schema.safeParse(body)
+    if (!result.success) {
+      throw new BadRequestException({
+        message: `Invalid ${event} webhook payload`,
+        details: result.error.flatten().fieldErrors,
+      })
+    }
+    return result.data
+  }
+}
+```
+
+---
+
+## Checklist ao adicionar evento
+- [ ] Nova rota: `@Post(':hash/callback/<nome>')` com `@Body() body: Record<string, unknown>`
+- [ ] Schema Zod em `schemas/<nome>.schema.ts`
+- [ ] Método `handle<Nome>(body)` no service usando `this.parse()`
+- [ ] Retorno `{ received: true }` + `@HttpCode(200)`
+- [ ] Não logar body completo — logar apenas IDs e tipo do evento

@@ -1,0 +1,224 @@
+---
+description: Arquitetura NestJS + TypeORM + Zod para apps/api. Controllers finos, use-cases, repositórios com QueryBuilder, migrations.
+globs:
+  - root-path/apps/api/**
+  - root-path/packages/domain/**
+  - root-path/packages/use-cases/**
+  - root-path/packages/shared/**
+---
+
+# Backend API — NestJS + TypeORM + Zod
+
+## 0) Princípios de camadas
+```
+Controller  → valida HTTP, chama use-case, mapeia erro para HTTP
+Use-case    → orquestra fluxo, regra de negócio (sem Nest, sem TypeORM)
+Repository  → acesso a dados (TypeORM), queries por intenção
+Domain      → entidades puras, invariantes, interfaces de repositório
+```
+**Nunca:** use-case com `HttpException` | controller com regra de negócio | entity TypeORM retornada direto na API.
+
+---
+
+## 1) DTOs com Zod (nestjs-zod)
+```ts
+// packages/shared/src/dto/create-lead.dto.ts
+import { z } from 'zod'
+import { createZodDto } from 'nestjs-zod'
+
+export const CreateLeadSchema = z.object({
+  name: z.string().min(1, 'Nome obrigatório').max(120),
+  email: z.string().email('Email inválido'),
+  phone: z.string().regex(/^\d{10,11}$/, 'Telefone inválido').optional(),
+})
+
+export class CreateLeadDto extends createZodDto(CreateLeadSchema) {}
+export type CreateLeadInput = z.infer<typeof CreateLeadSchema>
+```
+
+**Setup global (main.ts):**
+```ts
+import { ZodValidationPipe } from 'nestjs-zod'
+app.useGlobalPipes(new ZodValidationPipe())
+```
+
+**Feature DTOs estendem PaginationSchema:**
+```ts
+// apps/api/src/common/dto/pagination.dto.ts
+export const PaginationSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  order: z.enum(['ASC', 'DESC']).default('DESC'),
+})
+export class PaginationDto extends createZodDto(PaginationSchema) {}
+
+// Feature:
+export const FilterLeadsSchema = PaginationSchema.extend({
+  search: z.string().optional(),
+  status: z.enum(['active', 'converted', 'archived']).optional(),
+})
+export class FilterLeadsDto extends createZodDto(FilterLeadsSchema) {}
+export type FilterLeadsInput = z.infer<typeof FilterLeadsSchema>
+```
+
+---
+
+## 2) Controller fino
+```ts
+@Controller('leads')
+export class LeadsController {
+  constructor(private readonly createLead: CreateLeadUseCase) {}
+
+  @Post()
+  async create(@Body() dto: CreateLeadDto) {
+    return this.mapErrors(() => this.createLead.execute(dto))
+  }
+
+  @Get()
+  async list(@Query() filters: FilterLeadsDto) {
+    const result = await this.mapErrors(() => this.listLeads.execute(filters))
+    return paginatedResponse(result.data, result.total, filters.page, filters.limit)
+  }
+
+  private async mapErrors<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof EntityNotFoundError) throw new NotFoundException(err.message)
+      if (err instanceof BusinessRuleViolation) throw new UnprocessableEntityException(err.message)
+      throw err
+    }
+  }
+}
+```
+
+---
+
+## 3) Repositório — QueryBuilder obrigatório para queries complexas
+```ts
+// apps/api/src/leads/lead.repository.ts
+@Injectable()
+export class LeadRepository implements ILeadRepository {
+  constructor(
+    @InjectRepository(LeadEntity)
+    private readonly repo: Repository<LeadEntity>,
+  ) {}
+
+  // Queries simples: find/findOne OK
+  async findByEmail(email: string): Promise<LeadEntity | null> {
+    return this.repo.findOne({ where: { email } })
+  }
+
+  async getByIdOrFail(id: string): Promise<LeadEntity> {
+    const lead = await this.repo.findOne({ where: { id } })
+    if (!lead) throw new EntityNotFoundError(`Lead ${id} não encontrado`)
+    return lead
+  }
+
+  // Queries complexas: sempre QueryBuilder no repositório
+  async listWithFilters(input: FilterLeadsInput): Promise<[LeadEntity[], number]> {
+    const { page, limit, search, status, order } = input
+    const skip = (page - 1) * Math.min(limit, 100)
+
+    const qb = this.repo.createQueryBuilder('lead')
+      .select(['lead.id', 'lead.name', 'lead.email', 'lead.status', 'lead.createdAt'])
+      .leftJoin('lead.opportunities', 'opp')
+      .addSelect(['opp.id', 'opp.status'])
+
+    if (search) {
+      qb.andWhere('(lead.name ILIKE :search OR lead.email ILIKE :search)', {
+        search: `%${search}%`,
+      })
+    }
+    if (status) qb.andWhere('lead.status = :status', { status })
+
+    return qb
+      .orderBy('lead.created_at', order)
+      .skip(skip)
+      .take(Math.min(limit, 100))
+      .getManyAndCount()
+  }
+
+  async save(lead: LeadEntity): Promise<LeadEntity> {
+    return this.repo.save(lead)
+  }
+}
+```
+
+**Interface em packages/domain:**
+```ts
+// packages/domain/src/repositories/lead.repository.interface.ts
+export interface ILeadRepository {
+  findByEmail(email: string): Promise<LeadEntity | null>
+  getByIdOrFail(id: string): Promise<LeadEntity>
+  listWithFilters(input: FilterLeadsInput): Promise<[LeadEntity[], number]>
+  save(lead: LeadEntity): Promise<LeadEntity>
+}
+```
+
+---
+
+## 4) TypeORM — regras obrigatórias
+- `synchronize: false` sempre em produção.
+- Toda mudança de schema → migration (`typeorm migration:generate`).
+- `eager: false` por padrão; joins explícitos.
+- Indexar colunas usadas em `WHERE` / `ORDER BY` / FK.
+- Timestamps padrão: `createdAt`, `updatedAt` via `@CreateDateColumn` / `@UpdateDateColumn`.
+
+```ts
+@Entity('leads')
+@Index(['status', 'created_at'])
+export class LeadEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string
+
+  @Column({ name: 'full_name', length: 120 })
+  fullName: string
+
+  @Index()
+  @Column({ unique: true })
+  email: string
+
+  @Column({ default: 'active' })
+  status: string
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date
+}
+```
+
+---
+
+## 5) Transações
+```ts
+// Use-case coordena — infra executa
+async execute(input: TransferInput): Promise<void> {
+  await this.dataSource.transaction(async (manager) => {
+    const repo = manager.getRepository(LeadEntity)
+    // operações dentro da transação
+    // ⚠️ Nunca: chamadas HTTP/Redis/Queue dentro da transação
+  })
+}
+```
+
+---
+
+## 6) Segurança
+- Nunca concatenar SQL — usar parâmetros nomeados no QueryBuilder.
+- Nunca retornar entidade TypeORM direto — sempre mapear para DTO de resposta.
+- Nunca expor stack trace em produção.
+- AuthN/AuthZ: Guards fazem plumbing; regra de autorização ("pode fazer?") fica no use-case.
+
+---
+
+## 7) Checklist ao criar feature
+- [ ] Módulo + controller fino (sem regra de negócio)
+- [ ] DTO com Zod schema (`createZodDto`) + tipo exportado
+- [ ] Interface de repositório em `packages/domain`
+- [ ] Use-case em `packages/use-cases` (sem imports Nest/TypeORM)
+- [ ] Implementação do repositório com QueryBuilder para queries complexas
+- [ ] Mapeamento de erros de domínio → HTTP no controller
+- [ ] Migration para qualquer alteração de schema

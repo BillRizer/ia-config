@@ -1,0 +1,126 @@
+---
+description: Worker com RabbitMQ (amqplib / @golevelup/nestjs-rabbitmq) — exchanges, routing keys, DLQ, idempotência. Remova esta rule se o projeto não usa RabbitMQ.
+globs:
+  - root-path/apps/worker/**
+  - root-path/packages/use-cases/**
+  - root-path/packages/shared/**
+---
+
+# Worker — RabbitMQ
+
+## 0) Princípios
+- Consumer não contém regra de negócio — chama use-case.
+- Mensagens devem ser **idempotentes** (redelivery não corrompe estado).
+- Payload mínimo: apenas IDs e referências — nunca dados sensíveis, nunca entidades completas.
+
+---
+
+## 1) Configuração de exchanges e filas
+```ts
+// apps/worker/src/config/rabbitmq.config.ts
+export const EXCHANGES = {
+  EMAIL: 'email.exchange',
+  BILLING: 'billing.exchange',
+} as const
+
+export const QUEUES = {
+  EMAIL_SEND: 'email.send',
+  EMAIL_SEND_DLQ: 'email.send.dlq',
+} as const
+
+export const ROUTING_KEYS = {
+  EMAIL_SEND: 'email.send',
+} as const
+
+// Declarar na configuração do módulo:
+exchanges: [{ name: EXCHANGES.EMAIL, type: 'topic' }],
+queues: [{
+  name: QUEUES.EMAIL_SEND,
+  options: {
+    durable: true,
+    deadLetterExchange: '',
+    deadLetterRoutingKey: QUEUES.EMAIL_SEND_DLQ,
+  }
+}]
+```
+
+---
+
+## 2) Schema do payload (Zod)
+```ts
+// apps/worker/src/jobs/send-email.schema.ts
+import { z } from 'zod'
+
+export const SendEmailMessageSchema = z.object({
+  deliveryEmailId: z.string().uuid(),
+  correlationId: z.string().optional(),
+})
+export type SendEmailMessage = z.infer<typeof SendEmailMessageSchema>
+```
+
+---
+
+## 3) Publisher (API publica, nunca consome)
+```ts
+// apps/api/src/mail/mail.service.ts
+await this.amqpConnection.publish(
+  EXCHANGES.EMAIL,
+  ROUTING_KEYS.EMAIL_SEND,
+  { deliveryEmailId: delivery.id, correlationId } satisfies SendEmailMessage,
+  { persistent: true, messageId: `email-${delivery.id}` }, // messageId = deduplicação
+)
+```
+
+---
+
+## 4) Consumer (Worker consome)
+```ts
+// apps/worker/src/mail/mail.consumer.ts
+@RabbitSubscribe({
+  exchange: EXCHANGES.EMAIL,
+  routingKey: ROUTING_KEYS.EMAIL_SEND,
+  queue: QUEUES.EMAIL_SEND,
+  queueOptions: { durable: true },
+})
+async handleSendEmail(raw: Record<string, unknown>): Promise<Nack | void> {
+  const start = Date.now()
+
+  const parsed = SendEmailMessageSchema.safeParse(raw)
+  if (!parsed.success) {
+    this.logger.error('Invalid message payload — descartando (sem requeue)', JSON.stringify(parsed.error.flatten()))
+    return new Nack(false) // false = não requeue → vai para DLQ
+  }
+
+  const { deliveryEmailId, correlationId } = parsed.data
+  this.logger.log(`[email.send] deliveryId=${deliveryEmailId} correlationId=${correlationId}`)
+
+  try {
+    // Idempotência: use-case verifica estado antes de agir
+    await this.sendEmailUseCase.execute(parsed.data)
+    this.logger.log(`[email.send] deliveryId=${deliveryEmailId} completed in ${Date.now() - start}ms`)
+  } catch (err) {
+    this.logger.error(`[email.send] deliveryId=${deliveryEmailId} failed: ${(err as Error).message}`, (err as Error).stack)
+    return new Nack(true) // true = requeue (erro transitório)
+  }
+}
+
+private readonly logger = new Logger(MailConsumer.name)
+```
+
+### Estratégia de Nack
+| Tipo de erro | `Nack(requeue)` | Resultado |
+|---|---|---|
+| Payload inválido / erro de negócio | `Nack(false)` | DLQ — não vai tentar de novo |
+| Erro transitório (rede, DB temporário) | `Nack(true)` | Requeue — tenta novamente |
+| Processado com sucesso | `void` (ack implícito) | Removido da fila |
+
+---
+
+## 5) Checklist ao criar consumer
+- [ ] Schema Zod para o payload
+- [ ] `messageId` determinístico no publish para deduplicação
+- [ ] Idempotência no use-case (checar estado antes de executar)
+- [ ] DLQ configurada na fila
+- [ ] `Nack(false)` para erros irrecuperáveis, `Nack(true)` para transitórios
+- [ ] Logs de início, conclusão e falha
+- [ ] Nunca dados sensíveis no payload
