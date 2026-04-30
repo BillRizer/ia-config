@@ -2,13 +2,13 @@
 # ============================================================
 # install.sh — baixa as cursor rules e configura root-path
 # ============================================================
-# Uso: bash <(curl -fsSL https://raw.githubusercontent.com/fracto-dev/ia-config/main/install.sh) "<root-path>"
+# Uso: bash <(curl -fsSL https://raw.githubusercontent.com/BillRizer/ia-config/main/install.sh) "<root-path>"
 # Sem argumento: usa o nome do diretório atual.
 # ============================================================
 
 set -euo pipefail
 
-REPO_URL="https://raw.githubusercontent.com/fracto-dev/ia-config/main/rules"
+REPO_URL="https://raw.githubusercontent.com/BillRizer/ia-config/main/rules"
 DEST=".cursor/rules"
 ROOT="${1:-$(basename "$PWD")}"
 PLACEHOLDER="root-path"
