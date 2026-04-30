@@ -52,3 +52,22 @@ echo "✅ Pronto! APP_ROOT = '$ROOT'"
 echo ""
 echo "Arquivos instalados em $DEST:"
 ls "$DEST" | sed 's/^/  /'
+
+# ── .gitignore ──────────────────────────────────────────────
+GITIGNORE=".gitignore"
+IGNORE_ENTRY=".cursor/"
+
+if [[ -f "$GITIGNORE" ]]; then
+  if grep -qxF "$IGNORE_ENTRY" "$GITIGNORE"; then
+    echo ""
+    echo "ℹ️  '$IGNORE_ENTRY' já está no $GITIGNORE — nenhuma alteração."
+  else
+    printf "\n# Cursor AI rules (geradas pelo install.sh)\n%s\n" "$IGNORE_ENTRY" >> "$GITIGNORE"
+    echo ""
+    echo "📝 '$IGNORE_ENTRY' adicionado ao $GITIGNORE."
+  fi
+else
+  printf "# Cursor AI rules (geradas pelo install.sh)\n%s\n" "$IGNORE_ENTRY" > "$GITIGNORE"
+  echo ""
+  echo "📝 $GITIGNORE criado com '$IGNORE_ENTRY'."
+fi
